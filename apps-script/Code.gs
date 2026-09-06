@@ -30,7 +30,7 @@ var VISITS_SHEET = 'Visits';
 var SETTINGS_SHEET = 'Settings';
 var QR_FOLDER_NAME = 'Clinic Console QR';
 
-var PATIENTS_HEADERS = ['patientId', 'mobile', 'name', 'age', 'gender', 'createdAt'];
+var PATIENTS_HEADERS = ['patientId', 'mobile', 'name', 'age', 'gender', 'email', 'createdAt'];
 var VISITS_HEADERS = [
   'visitId', 'patientId', 'patientName', 'patientAge', 'patientGender',
   'visitNo', 'date', 'createdAt', 'done',
@@ -40,6 +40,8 @@ var VISITS_HEADERS = [
   'nextAppointment', 'nextAppointmentTime', 'comments',
   'labName', 'labToothNumber', 'labDescription',
   'calendarEventId',
+  'patientProblem', 'queueNumber',
+  'medicines', 'paySplits', 'documents',
 ];
 
 function doGet(e) {
@@ -59,6 +61,10 @@ function doPost(e) {
     if (action === 'saveIntake') return jsonOut_(action_saveIntake_(body));
     if (action === 'saveClinical') return jsonOut_(action_saveClinical_(body));
     if (action === 'uploadQr') return jsonOut_(action_uploadQr_(body));
+    if (action === 'portalCheckin') return jsonOut_(action_portalCheckin_(body));
+    if (action === 'savePatientProblem') return jsonOut_(action_savePatientProblem_(body));
+    if (action === 'sendOtp') return jsonOut_(action_sendOtp_(body));
+    if (action === 'verifyOtp') return jsonOut_(action_verifyOtp_(body));
     return jsonOut_({ ok: false, error: 'Unknown or missing action: ' + action });
   } catch (err) {
     return jsonOut_({ ok: false, error: String(err && err.message || err) });
@@ -173,6 +179,7 @@ function readSnapshot_() {
       name: p.name || '',
       age: p.age === '' ? '' : p.age,
       gender: p.gender || '',
+      email: p.email || '',
       visits: [],
     };
     order.push(p.patientId);
@@ -190,12 +197,12 @@ function readSnapshot_() {
       clinical: {
         patientType: v.patientType || '',
         medicalHistory: v.medicalHistory || '',
-        chiefComplaint: v.chiefComplaint || '',
+        chiefComplaint: parseJsonOrString_(v.chiefComplaint),
         chiefDescription: v.chiefDescription || '',
-        treatmentGroup: v.treatmentGroup || '',
-        treatment: v.treatment || '',
-        advisedTreatment: v.advisedTreatment || '',
-        toothNumber: v.toothNumber instanceof Date ? '' : String(v.toothNumber || ''),
+        treatmentGroup: parseJsonOrString_(v.treatmentGroup),
+        treatment: parseJsonOrString_(v.treatment),
+        advisedTreatment: parseJsonOrString_(v.advisedTreatment),
+        toothNumber: parseJsonOrString_(v.toothNumber instanceof Date ? '' : String(v.toothNumber || '')),
         treatmentOther: v.treatmentOther || '',
         advisedTreatmentOther: v.advisedTreatmentOther || '',
         treatmentCost: v.treatmentCost === '' ? '' : String(v.treatmentCost),
@@ -211,7 +218,12 @@ function readSnapshot_() {
         labName: v.labName || '',
         labToothNumber: v.labToothNumber instanceof Date ? '' : String(v.labToothNumber || ''),
         labDescription: v.labDescription || '',
+        patientProblem: v.patientProblem || '',
+        medicines: parseJsonArr_(v.medicines),
+        paySplits: parseJsonArr_(v.paySplits),
+        documents: parseJsonArr_(v.documents),
       },
+      queueNumber: v.queueNumber === '' ? '' : (typeof v.queueNumber === 'number' ? v.queueNumber : (parseInt(v.queueNumber, 10) || '')),
     });
   });
 
@@ -234,6 +246,21 @@ function readSnapshot_() {
 
 function formatDate_(d) {
   return Utilities.formatDate(d, Session.getScriptTimeZone() || 'Etc/UTC', 'yyyy-MM-dd');
+}
+
+function parseJsonArr_(val) {
+  if (!val || val === '') return [];
+  try { var parsed = JSON.parse(val); return Array.isArray(parsed) ? parsed : []; }
+  catch (e) { return []; }
+}
+
+function parseJsonOrString_(val) {
+  if (!val || val === '') return [];
+  var s = String(val);
+  if (s.charAt(0) === '[') {
+    try { var parsed = JSON.parse(s); if (Array.isArray(parsed)) return parsed; } catch (e) {}
+  }
+  return [s];
 }
 
 // ---------- Google Calendar integration ----------
@@ -434,15 +461,16 @@ function action_saveClinical_(body) {
     var balanceDue = remaining;
     var paymentStatus = remaining <= 0 ? 'Fully Paid' : (num(cform.amountPaid) > 0 ? 'Partially paid' : 'Not paid');
     var r = targetRow + 2;
+    var jsonField = function(val) { return Array.isArray(val) ? JSON.stringify(val) : (val || ''); };
     var fields = {
       patientType: cform.patientType || '',
       medicalHistory: cform.medicalHistory || '',
-      chiefComplaint: cform.chiefComplaint || '',
+      chiefComplaint: jsonField(cform.chiefComplaint),
       chiefDescription: cform.chiefDescription || '',
-      treatmentGroup: cform.treatmentGroup || '',
-      treatment: cform.treatment || '',
-      advisedTreatment: cform.advisedTreatment || '',
-      toothNumber: cform.toothNumber || '',
+      treatmentGroup: jsonField(cform.treatmentGroup),
+      treatment: jsonField(cform.treatment),
+      advisedTreatment: jsonField(cform.advisedTreatment),
+      toothNumber: jsonField(cform.toothNumber),
       treatmentOther: cform.treatmentOther || '',
       advisedTreatmentOther: cform.advisedTreatmentOther || '',
       treatmentCost: cform.treatmentCost || '',
@@ -458,11 +486,15 @@ function action_saveClinical_(body) {
       labName: cform.labName || '',
       labToothNumber: cform.labToothNumber || '',
       labDescription: cform.labDescription || '',
+      medicines: JSON.stringify(cform.medicines || []),
+      paySplits: JSON.stringify(cform.paySplits || []),
+      documents: JSON.stringify(cform.documents || []),
       done: true,
     };
     for (var key in fields) {
+      if (vData.idx[key] === undefined) continue;
       var cell = visitsSh.getRange(r, vData.idx[key] + 1);
-      if (key === 'toothNumber' || key === 'labToothNumber' || key === 'nextAppointmentTime') cell.setNumberFormat('@');
+      if (key === 'toothNumber' || key === 'labToothNumber' || key === 'nextAppointmentTime' || key === 'medicines' || key === 'paySplits' || key === 'documents' || key === 'chiefComplaint' || key === 'treatmentGroup' || key === 'treatment' || key === 'advisedTreatment') cell.setNumberFormat('@');
       cell.setValue(fields[key]);
     }
 
@@ -532,6 +564,266 @@ function action_uploadQr_(body) {
     setSetting_(settingsSh, 'upiQr', url);
 
     return readSnapshot_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function todayLocal_() {
+  var tz = Session.getScriptTimeZone() || 'Asia/Kolkata';
+  return Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+}
+
+function action_portalCheckin_(body) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ensureAllSheets_();
+    var mobile = normMobile_(body.mobile);
+    var name = String(body.name || '').trim();
+    var age = body.age;
+    var gender = String(body.gender || '');
+    var email = String(body.email || '').trim();
+    var date = todayLocal_();
+    if (!mobile) return { ok: false, error: 'Mobile number is required.' };
+    if (!name || String(age).trim() === '' || !gender) {
+      return { ok: false, error: 'Name, age, and gender are required.' };
+    }
+
+    var patientsSh = ensureSheet_(PATIENTS_SHEET, PATIENTS_HEADERS);
+    var visitsSh = ensureSheet_(VISITS_SHEET, VISITS_HEADERS);
+    var settingsSh = ensureSheet_(SETTINGS_SHEET, ['key', 'value']);
+
+    var pData = sheetRows_(patientsSh);
+    var patientId = null;
+    var rowIdx = -1;
+    var nameToMatch = name.toLowerCase();
+    for (var i = 0; i < pData.rows.length; i++) {
+      if (String(pData.rows[i][pData.idx.mobile]) === mobile &&
+          String(pData.rows[i][pData.idx.name] || '').trim().toLowerCase() === nameToMatch) {
+        patientId = pData.rows[i][pData.idx.patientId];
+        rowIdx = i;
+        break;
+      }
+    }
+
+    if (patientId) {
+      var r = rowIdx + 2;
+      patientsSh.getRange(r, pData.idx.age + 1).setValue(age);
+      patientsSh.getRange(r, pData.idx.gender + 1).setValue(gender);
+      if (email && pData.idx.email !== undefined) {
+        patientsSh.getRange(r, pData.idx.email + 1).setValue(email);
+      }
+    } else {
+      var settings = settingsMap_(settingsSh);
+      var seq = Number(settings.seq || 0) + 1;
+      patientId = 'P' + ('0000' + seq).slice(-4);
+      var pIdx = headerIndex_(patientsSh);
+      var pNumCols = patientsSh.getLastColumn();
+      var pNewRow = new Array(pNumCols).fill('');
+      var setPCol = function (key, val) { if (pIdx[key] !== undefined) pNewRow[pIdx[key]] = val; };
+      setPCol('patientId', patientId);
+      setPCol('mobile', mobile);
+      setPCol('name', name);
+      setPCol('age', age);
+      setPCol('gender', gender);
+      setPCol('email', email);
+      setPCol('createdAt', new Date().toISOString());
+      patientsSh.appendRow(pNewRow);
+      setSetting_(settingsSh, 'seq', seq);
+    }
+
+    var vData = sheetRows_(visitsSh);
+    var vIdx = headerIndex_(visitsSh);
+
+    var existingTodayVisit = null;
+    var visitNo = 1;
+    for (var vi = 0; vi < vData.rows.length; vi++) {
+      if (vData.rows[vi][vData.idx.patientId] !== patientId) continue;
+      visitNo++;
+      var vDate = vData.rows[vi][vData.idx.date];
+      if (vDate instanceof Date) vDate = formatDate_(vDate);
+      else vDate = String(vDate || '');
+      if (vDate === date) {
+        existingTodayVisit = {
+          visitId: vData.rows[vi][vData.idx.visitId],
+          queueNumber: vData.rows[vi][vData.idx.queueNumber] || '',
+        };
+      }
+    }
+
+    if (existingTodayVisit) {
+      var snap = readSnapshot_();
+      snap.patientId = patientId;
+      snap.visitId = existingTodayVisit.visitId;
+      snap.queueNumber = existingTodayVisit.queueNumber;
+      return snap;
+    }
+
+    var queueNum = 1;
+    for (var qi = 0; qi < vData.rows.length; qi++) {
+      var qDate = vData.rows[qi][vData.idx.date];
+      if (qDate instanceof Date) qDate = formatDate_(qDate);
+      else qDate = String(qDate || '');
+      if (qDate === date) {
+        var qn = parseInt(vData.rows[qi][vData.idx.queueNumber], 10);
+        if (qn >= queueNum) queueNum = qn + 1;
+      }
+    }
+
+    var visitId = patientId + '_' + visitNo;
+    var numCols = visitsSh.getLastColumn();
+    var newRow = new Array(numCols).fill('');
+    var setCol = function (key, val) { if (vIdx[key] !== undefined) newRow[vIdx[key]] = val; };
+    setCol('visitId', visitId);
+    setCol('patientId', patientId);
+    setCol('visitNo', visitNo);
+    setCol('date', date);
+    setCol('createdAt', new Date().toISOString());
+    setCol('done', false);
+    setCol('patientName', name);
+    setCol('patientGender', gender);
+    setCol('patientAge', age);
+    setCol('queueNumber', queueNum);
+    visitsSh.appendRow(newRow);
+
+    var snap = readSnapshot_();
+    snap.patientId = patientId;
+    snap.visitId = visitId;
+    snap.queueNumber = queueNum;
+    return snap;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function action_savePatientProblem_(body) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    ensureAllSheets_();
+    var patientId = String(body.patientId || '');
+    var visitId = String(body.visitId || '');
+    var patientProblem = String(body.patientProblem || '');
+    if (!patientId || !visitId) return { ok: false, error: 'Missing patient or visit id.' };
+
+    var visitsSh = ensureSheet_(VISITS_SHEET, VISITS_HEADERS);
+    var vData = sheetRows_(visitsSh);
+
+    var targetRow = -1;
+    for (var i = 0; i < vData.rows.length; i++) {
+      if (vData.rows[i][vData.idx.visitId] === visitId &&
+          vData.rows[i][vData.idx.patientId] === patientId) {
+        targetRow = i;
+        break;
+      }
+    }
+    if (targetRow === -1) return { ok: false, error: 'Visit not found: ' + visitId };
+
+    var r = targetRow + 2;
+    if (vData.idx.patientProblem !== undefined) {
+      visitsSh.getRange(r, vData.idx.patientProblem + 1).setValue(patientProblem);
+    }
+
+    return readSnapshot_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// ---------- OTP via Twilio ----------
+
+var OTP_SHEET = 'OTP';
+var OTP_HEADERS = ['mobile', 'otp', 'createdAt', 'used'];
+var OTP_EXPIRY_MS = 5 * 60 * 1000;
+
+function getTwilioCreds_(body) {
+  return {
+    sid: String(body.twilioSid || ''),
+    token: String(body.twilioToken || ''),
+    from: String(body.twilioFrom || ''),
+  };
+}
+
+function action_sendOtp_(body) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var mobile = normMobile_(body.mobile);
+    if (!mobile || mobile.length !== 10) return { ok: false, error: 'Please enter a valid 10-digit mobile number.' };
+
+    var creds = getTwilioCreds_(body);
+    if (!creds.sid || !creds.token || !creds.from) {
+      return { ok: false, error: 'OTP service not configured. Please contact the clinic.' };
+    }
+
+    var otp = String(Math.floor(100000 + Math.random() * 900000));
+    var otpSh = ensureSheet_(OTP_SHEET, OTP_HEADERS);
+    var otpIdx = headerIndex_(otpSh);
+    var numCols = otpSh.getLastColumn();
+    var newRow = new Array(numCols).fill('');
+    if (otpIdx.mobile !== undefined) newRow[otpIdx.mobile] = mobile;
+    if (otpIdx.otp !== undefined) newRow[otpIdx.otp] = otp;
+    if (otpIdx.createdAt !== undefined) newRow[otpIdx.createdAt] = new Date().toISOString();
+    if (otpIdx.used !== undefined) newRow[otpIdx.used] = false;
+    otpSh.appendRow(newRow);
+
+    var toNumber = '+91' + mobile;
+    var url = 'https://api.twilio.com/2010-04-01/Accounts/' + creds.sid + '/Messages.json';
+    var payload = {
+      To: toNumber,
+      From: creds.from,
+      Body: 'Your PatientPad verification code is ' + otp + '. Valid for 5 minutes.',
+    };
+    var options = {
+      method: 'post',
+      payload: payload,
+      headers: {
+        Authorization: 'Basic ' + Utilities.base64Encode(creds.sid + ':' + creds.token),
+      },
+      muteHttpExceptions: true,
+    };
+    var res = UrlFetchApp.fetch(url, options);
+    var code = res.getResponseCode();
+    if (code < 200 || code >= 300) {
+      return { ok: false, error: 'Failed to send OTP. Please try again.' };
+    }
+
+    return { ok: true, sent: true };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function action_verifyOtp_(body) {
+  var lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    var mobile = normMobile_(body.mobile);
+    var otpInput = String(body.otp || '').trim();
+    if (!mobile || mobile.length !== 10) return { ok: false, error: 'Invalid mobile number.' };
+    if (!otpInput || otpInput.length !== 6) return { ok: false, error: 'Please enter the 6-digit code.' };
+
+    var otpSh = ensureSheet_(OTP_SHEET, OTP_HEADERS);
+    var data = sheetRows_(otpSh);
+    var now = new Date().getTime();
+
+    var matched = false;
+    for (var i = data.rows.length - 1; i >= 0; i--) {
+      var row = data.rows[i];
+      if (String(row[data.idx.mobile]) !== mobile) continue;
+      if (row[data.idx.used] === true || row[data.idx.used] === 'TRUE' || row[data.idx.used] === 'true') continue;
+      var created = new Date(row[data.idx.createdAt]).getTime();
+      if (now - created > OTP_EXPIRY_MS) continue;
+      if (String(row[data.idx.otp]) === otpInput) {
+        otpSh.getRange(i + 2, data.idx.used + 1).setValue(true);
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) return { ok: false, error: 'Invalid or expired OTP. Please try again.' };
+    return { ok: true, verified: true };
   } finally {
     lock.releaseLock();
   }
